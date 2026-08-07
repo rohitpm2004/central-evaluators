@@ -19,6 +19,7 @@ import { initializeJsWorker, stopJsWorker } from './workers/jsWorker.js';
 import { initializeBackendWorker, stopBackendWorker } from './workers/backendWorker.js';
 
 import { requireApiKey, evaluateRateLimiter } from './middleware/auth.js';
+import webhookRouter from './router/webhookRouter.js';
 
 dotenv.config();
 
@@ -58,6 +59,7 @@ async function startServer() {
 
     // 4. API routes (V-04: rate limit + API-key auth)
     app.post('/evaluate', evaluateRateLimiter, requireApiKey, evaluate);
+    app.use('/api/webhook', webhookRouter);
 
     // 5. Health check endpoints
     app.get('/health', (req, res) => {

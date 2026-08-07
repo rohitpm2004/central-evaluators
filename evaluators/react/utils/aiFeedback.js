@@ -21,7 +21,7 @@ function getClient() {
   // Groq is OpenAI API-compatible — just point baseURL to Groq's endpoint
   client = new OpenAI({
     apiKey,
-    // baseURL: process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1",
+    baseURL: process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1",
   });
 
   logger.info("Groq client initialised.");

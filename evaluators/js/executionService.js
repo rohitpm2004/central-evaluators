@@ -3,6 +3,7 @@
 // TODO(security, V-34): vm2 is deprecated and has known sandbox-escape CVEs.
 // Migrate JS execution to isolated-vm or an E2B sandbox. See VISUAL_EVALUATOR_AUDIT.md V-34.
 import { VM } from "vm2";
+import { validateScriptWithAI } from "./aiValidationService.js";
 
 // Author: Arma Sahar
 // vm2's own `timeout` option (below, 1000ms) only bounds *synchronous*
@@ -156,45 +157,65 @@ export async function runJavaScript({
     // SCRIPT MODE
     // -------------------------
 
-if (evaluationMode === "script") {
-  const normalizedActual =
-    logs.map(v => String(v).trim());
-  const normalizedExpected =
-    expectedLogs.map(v => String(v).trim());
-  let matched = 0;
-  const failures = [];
-  for (
-    let i = 0;
-    i < normalizedExpected.length;
-    i++
-  ) {
-    const expected =
-      normalizedExpected[i];
+    if (evaluationMode === "script") {
+      const normalizedActual = logs.map((v) => String(v).trim());
+      const normalizedExpected = expectedLogs.map((v) => String(v).trim());
+      
+      let matched = 0;
+      let failures = [];
+      let strictMatched = true;
 
-    const actual =
-      normalizedActual[i];
-    if (actual === expected) {
-      matched++;
+      for (let i = 0; i < normalizedExpected.length; i++) {
+        const expected = normalizedExpected[i];
+        const actual = normalizedActual[i];
+        if (actual === expected) {
+          matched++;
+        } else {
+          strictMatched = false;
+          failures.push({
+            logNumber: i + 1,
+            expected,
+            actual,
+          });
+        }
+      }
+
+      // If strict match fails, fallback to AI Validation
+      if (!strictMatched && normalizedActual.length > 0) {
+        const aiResults = await validateScriptWithAI({
+          studentCode,
+          expectedLogs: normalizedExpected,
+          actualLogs: normalizedActual,
+        });
+
+        if (aiResults) {
+          // Recompute matched and failures based on AI results
+          matched = 0;
+          failures = [];
+          for (let i = 0; i < normalizedExpected.length; i++) {
+            if (aiResults[i]) {
+              matched++;
+            } else {
+              failures.push({
+                logNumber: i + 1,
+                expected: normalizedExpected[i],
+                actual: normalizedActual[i] || undefined,
+                aiNote: "AI determined this output did not conceptually match expectations.",
+              });
+            }
+          }
+        }
+      }
+
+      return {
+        passed: matched === normalizedExpected.length,
+        matched,
+        total: normalizedExpected.length,
+        failures,
+        actual: normalizedActual,
+        expected: normalizedExpected,
+      };
     } else {
-      failures.push({
-        logNumber: i + 1,
-        expected,
-        actual
-      });
-    }
-  }
-  return {
-    passed:
-      matched ===
-      normalizedExpected.length,
-    matched,
-    total:
-      normalizedExpected.length,
-    failures,
-    actual: normalizedActual,
-    expected: normalizedExpected
-  };
-}else{
   return {
     passed: false,
     error:

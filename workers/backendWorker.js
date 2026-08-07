@@ -2,7 +2,7 @@ import { Worker } from 'bullmq';
 import redisConnection from '../config/redis.js';
 import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
-import { evaluateBackendProject } from '../evaluators/backend/evaluatorService.js';
+import { triggerGraderWorkflow } from '../services/githubActionService.js';
 import { withTimeout } from '../evaluators/react/utils/timeout.js';
 
 
@@ -27,7 +27,54 @@ export async function initializeBackendWorker() {
           // concurrency 3, three such jobs stall the entire backend queue
           // for everyone behind them, with no automatic recovery.
           const results = await withTimeout(
-            evaluateBackendProject(job.data),
+            new Promise((resolve, reject) => {
+              const subscriber = redisConnection.getClient().duplicate();
+              let timeoutId;
+              
+              subscriber.subscribe(`github_webhook_${job.id}`, async (err) => {
+                if (err) {
+                  await subscriber.quit();
+                  return reject(err);
+                }
+                
+                // Explicit timeout to prevent Redis connection leaks
+                timeoutId = setTimeout(async () => {
+                  await subscriber.quit();
+                  reject(new Error("GitHub Actions webhook timeout"));
+                }, config.timeout);
+                
+                try {
+                  const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+                  const repoUrl = job.data.repoUrl || job.data.submission_link;
+                  await triggerGraderWorkflow(repoUrl, job.id, webhookUrl);
+                } catch (e) {
+                  clearTimeout(timeoutId);
+                  await subscriber.quit();
+                  return reject(e);
+                }
+              });
+
+              subscriber.on('message', async (channel, message) => {
+                if (channel === `github_webhook_${job.id}`) {
+                  clearTimeout(timeoutId);
+                  await subscriber.quit();
+                  try {
+                    const payload = JSON.parse(message);
+                    if (payload.status === 'completed') {
+                      const score = (payload.testOutput || '').toLowerCase().includes('fail') ? 0 : 100;
+                      resolve({
+                        score: score,
+                        feedback: payload.testOutput || 'Evaluation completed successfully.'
+                      });
+                    } else {
+                      reject(new Error("GitHub Actions job failed or cancelled"));
+                    }
+                  } catch (parseErr) {
+                    reject(parseErr);
+                  }
+                }
+              });
+            }),
             config.timeout,
             `backend-eval ${job.id}`
           );

@@ -21,7 +21,6 @@
   "license": "ISC",
   "description": "Distributed automated evaluation platform for assessing student submissions",
   "dependencies": {
-    "@e2b/code-interpreter": "^1.2.0",
     "acorn": "^8.17.0",
     "acorn-walk": "^8.3.5",
     "bullmq": "^5.76.8",
