@@ -50,7 +50,7 @@ export async function initializeVisualWorker() {
         return await processVisualJob(job);
       },
       {
-        connection: redisConnection.getClient().duplicate(), // V-13: dedicated blocking connection per worker
+        connection: redisConnection.getClient(), // V-13: BullMQ will duplicate this for the blocking client automatically
         concurrency: config.concurrency,  // 2 concurrent jobs
         settings: {
           maxStalledCount: 2,             // Allow 2 stalls before failing

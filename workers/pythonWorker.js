@@ -43,7 +43,7 @@ export async function initializePythonWorker() {
           }
       },
       {
-        connection: redisConnection.getClient().duplicate(), // V-13: dedicated blocking connection per worker
+        connection: redisConnection.getClient(),
         concurrency: config.concurrency,
         settings: {
           maxStalledCount: 2,
