@@ -15,7 +15,7 @@ export function runPython(filePath, input) {
 
     let output = "";
 
-    process.stdin.write(input);
+    process.stdin.write(String(input));
 
     process.stdin.end();
 

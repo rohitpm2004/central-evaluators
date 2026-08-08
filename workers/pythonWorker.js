@@ -3,7 +3,7 @@ import redisConnection from '../config/redis.js';
 import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
 // import { evaluateJavaScript } from '../evaluators/javascript/evaluatorService.js';
-import { cloneRepo } from "../evaluators/python/repoService.js";
+import { cloneRepo, deleteRepo } from "../evaluators/python/repoService.js";
 import { findPythonFiles } from "../evaluators/python/fileService.js";
 import { evaluateAll } from "../evaluators/python/evaluator.js";
 
@@ -19,22 +19,28 @@ export async function initializePythonWorker() {
     pythonWorker = new Worker(
       'python-evaluation',
       async (job) => {
-        try {
-          logger.info(`Starting Python evaluation: ${job.id}`);
-          const { repoUrl } = job.data;
-          // 1. Clone repo
-          const repoPath = await cloneRepo(repoUrl);
-          // 2. Find python files
-          const students = findPythonFiles(repoPath);
-          // 3. Evaluate
-          const results = await evaluateAll(students);
-          // const results = await evaluateJavaScript(job.data);
-          logger.info(`Python Job ${job.id} completed`);
-          return { success: true, results };
-        } catch (err) {
-          logger.error(`Python Job ${job.id} failed`, err);
-          throw err;
-        }
+          let repoPath;
+          try {
+            logger.info(`Starting Python evaluation: ${job.id}`);
+            const { repoUrl } = job.data;
+            // 1. Clone repo
+            repoPath = await cloneRepo(repoUrl);
+            // 2. Find python files
+            const students = findPythonFiles(repoPath);
+            // 3. Evaluate
+            const results = await evaluateAll(students);
+            // const results = await evaluateJavaScript(job.data);
+            logger.info(`Python Job ${job.id} completed`);
+            return { success: true, results };
+          } catch (err) {
+            logger.error(`Python Job ${job.id} failed`, err);
+            throw err;
+          } finally {
+            if (repoPath) {
+              await deleteRepo(repoPath);
+              logger.info(`[PYTHON WORKER] deleted temp repo: ${repoPath}`);
+            }
+          }
       },
       {
         connection: redisConnection.getClient().duplicate(), // V-13: dedicated blocking connection per worker

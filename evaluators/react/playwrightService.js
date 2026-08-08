@@ -8,14 +8,13 @@ import runPlaywrightTests from "./playwrightTests.js";
  * 3. Run Playwright UI tests against the public E2B URL
  * 4. Return structured test results + full execution logs
  *
- * @param {string} projectPath         - Absolute path to the extracted React project (kept for compatibility)
- * @param {string} submission_zip_path - Absolute path to the uploaded zip file (speedier upload to E2B)
+ * @param {string} projectPath         - Absolute path to the cloned project directory
  * @returns {Object} { components, props, state, routing, api, logs }
  */
-export default async function runTests(projectPath, submission_zip_path) {
+export default async function runTests(projectPath) {
 
   // Spin up sandbox — returns the sandbox instance, the public app URL, and the actual project directory
-  const { sandbox, appUrl, projectDir } = await spinTestEnvironment(submission_zip_path);
+  const { sandbox, appUrl, projectDir } = await spinTestEnvironment(projectPath);
 
   // Auto-kill after 5 minutes to prevent runaway processes
   enforceTimeout(sandbox, 300000);

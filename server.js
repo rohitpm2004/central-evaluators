@@ -17,6 +17,8 @@ import redisConnection from './config/redis.js';
 import { initializeVisualWorker, stopVisualWorker } from './workers/visualWorker.js';
 import { initializeJsWorker, stopJsWorker } from './workers/jsWorker.js';
 import { initializeBackendWorker, stopBackendWorker } from './workers/backendWorker.js';
+import { initializeReactWorker, stopReactWorker } from './workers/reactWorker.js';
+import { initializePythonWorker, stopPythonWorker } from './workers/pythonWorker.js';
 
 import { requireApiKey, evaluateRateLimiter } from './middleware/auth.js';
 import webhookRouter from './router/webhookRouter.js';
@@ -47,7 +49,7 @@ async function startServer() {
     await queueManager.initialize();
     logger.info('✅ Queue manager initialized');
 
-    // 3. Initialize workers (visual + javascript + backend — see import comment above)
+    // 3. Initialize workers
     await initializeVisualWorker();
     logger.info('✅ Visual worker initialized');
 
@@ -56,6 +58,12 @@ async function startServer() {
 
     await initializeBackendWorker();
     logger.info('✅ Backend worker initialized');
+
+    await initializeReactWorker();
+    logger.info('✅ React worker initialized');
+
+    await initializePythonWorker();
+    logger.info('✅ Python worker initialized');
 
     // 4. API routes (V-04: rate limit + API-key auth)
     app.post('/evaluate', evaluateRateLimiter, requireApiKey, evaluate);
@@ -149,6 +157,8 @@ async function shutdown(signal) {
     await stopVisualWorker();
     await stopJsWorker();
     await stopBackendWorker();
+    await stopReactWorker();
+    await stopPythonWorker();
     await queueManager.disconnect();
     logger.info('Shutdown complete');
     process.exit(0);

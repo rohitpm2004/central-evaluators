@@ -56,14 +56,7 @@ async function validateVisualPayload(payload) {
 // with that. Only a syntax + allowlist check runs here (cheap, no DNS) —
 // the full SSRF check (assertSafeUrl, with DNS resolution) still runs
 // again right before the actual clone, same as the visual evaluator does.
-function validateBackendPayload(payload) {
-  const { repoUrl, rubric } = payload;
-
-  if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
-    throw new ValidationError('repoUrl is required');
-  }
-  assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
-
+function validateRubricCriteria(rubric) {
   if (!rubric || !Array.isArray(rubric.criteria) || rubric.criteria.length === 0) {
     throw new ValidationError('rubric.criteria must be a non-empty array');
   }
@@ -84,6 +77,36 @@ function validateBackendPayload(payload) {
   });
 }
 
+function validateBackendPayload(payload) {
+  const { repoUrl, rubric } = payload;
+
+  if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
+    throw new ValidationError('repoUrl is required');
+  }
+  assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
+
+  validateRubricCriteria(rubric);
+}
+
+// python. just needs a cloneable repoUrl (test cases come from a fixed server side repo, not the payload)
+function validatePythonPayload(payload) {
+  const { repoUrl } = payload;
+  if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
+    throw new ValidationError('repoUrl is required');
+  }
+  assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
+}
+
+// react. repoUrl + rubric. same criteria shape as backend.
+function validateReactPayload(payload) {
+  const { repoUrl, rubric } = payload;
+  if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
+    throw new ValidationError('repoUrl is required');
+  }
+  assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
+  validateRubricCriteria(rubric);
+}
+
 export async function evaluate(req, res) {
   try {
     const payload = req.body || {};
@@ -101,6 +124,14 @@ export async function evaluate(req, res) {
 
     if (payload.type === 'backend') {
       validateBackendPayload(payload);
+    }
+    
+    if (payload.type === 'python') {
+      validatePythonPayload(payload);
+    }
+    
+    if (payload.type === 'react') {
+      validateReactPayload(payload);
     }
 
     const jobs = await routeEvaluation(payload);
