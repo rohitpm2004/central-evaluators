@@ -33,7 +33,8 @@ export async function cloneRepo(repoUrl) {
     fs.mkdirSync(TEMP_DIR, { recursive: true });
   }
 
-  const repoName = `repo_${Date.now()}`;
+  const { randomUUID } = await import('crypto');
+  const repoName = `repo_${Date.now()}_${randomUUID()}`;
   const repoPath = path.join(TEMP_DIR, repoName);
 
   // --depth 1: shallow clone, we only ever need the latest snapshot.
