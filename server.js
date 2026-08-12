@@ -19,6 +19,7 @@ import { initializeJsWorker, stopJsWorker } from './workers/jsWorker.js';
 import { initializeBackendWorker, stopBackendWorker } from './workers/backendWorker.js';
 import { initializeReactWorker, stopReactWorker } from './workers/reactWorker.js';
 import { initializePythonWorker, stopPythonWorker } from './workers/pythonWorker.js';
+import { initializeFullstackWorker, stopFullstackWorker } from './workers/fullstackWorker.js';
 
 import { requireApiKey, evaluateRateLimiter } from './middleware/auth.js';
 import webhookRouter from './router/webhookRouter.js';
@@ -64,6 +65,9 @@ async function startServer() {
 
     await initializePythonWorker();
     logger.info('✅ Python worker initialized');
+
+    await initializeFullstackWorker();
+    logger.info('✅ Fullstack worker initialized');
 
     // 4. API routes (V-04: rate limit + API-key auth)
     app.post('/evaluate', evaluateRateLimiter, requireApiKey, evaluate);
@@ -159,6 +163,7 @@ async function shutdown(signal) {
     await stopBackendWorker();
     await stopReactWorker();
     await stopPythonWorker();
+    await stopFullstackWorker();
     await queueManager.disconnect();
     logger.info('Shutdown complete');
     process.exit(0);

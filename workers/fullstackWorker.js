@@ -5,6 +5,7 @@ import logger from '../config/logger.js';
 import { triggerGraderWorkflow } from '../services/githubActionService.js';
 import { withTimeout } from '../evaluators/react/utils/timeout.js';
 import { evaluateReactProject as evaluateFullstackProject } from "../evaluators/react/evaluatorService.js";
+import { webhookPubSub } from '../services/webhookPubSub.js';
 
 let fullstackWorker = null;
 
@@ -22,45 +23,15 @@ export async function initializeFullstackWorker() {
           
           // Phase 1: Dispatch to GitHub Actions
           const githubResult = await withTimeout(
-            new Promise((resolve, reject) => {
-              const subscriber = redisConnection.getClient().duplicate();
-              let timeoutId;
+            (async () => {
+              const webhookPromise = webhookPubSub.waitForWebhook(job.id, config.timeout);
               
-              subscriber.subscribe(`github_webhook_${job.id}`, async (err) => {
-                if (err) {
-                  await subscriber.quit();
-                  return reject(err);
-                }
-                
-                timeoutId = setTimeout(async () => {
-                  await subscriber.quit();
-                  reject(new Error("GitHub Actions webhook timeout"));
-                }, config.timeout);
-                
-                try {
-                  const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
-                  const repoUrl = job.data.repoUrl || job.data.submission_link;
-                  await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-fullstack-evaluation');
-                } catch (e) {
-                  clearTimeout(timeoutId);
-                  await subscriber.quit();
-                  return reject(e);
-                }
-              });
-
-              subscriber.on('message', async (channel, message) => {
-                if (channel === `github_webhook_${job.id}`) {
-                  clearTimeout(timeoutId);
-                  await subscriber.quit();
-                  try {
-                    const payload = JSON.parse(message);
-                    resolve(payload);
-                  } catch (parseErr) {
-                    reject(parseErr);
-                  }
-                }
-              });
-            }),
+              const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+              const repoUrl = job.data.repoUrl || job.data.submission_link;
+              await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-fullstack-evaluation');
+              
+              return await webhookPromise;
+            })(),
             config.timeout,
             `fullstack-eval-github ${job.id}`
           );
@@ -69,12 +40,9 @@ export async function initializeFullstackWorker() {
           if (githubResult.status !== 'completed' || (githubResult.testOutput || '').toLowerCase().includes('build: failed')) {
             logger.info(`Fullstack Job ${job.id} failed build on GitHub Actions.`);
             return {
-              success: true,
-              results: {
-                score: 0,
-                feedback: `Your application failed to build. Linter/Build Report:\n\n${githubResult.testOutput || 'Unknown Build Error'}`,
-                rubric_breakdown: []
-              }
+              score: 0,
+              feedback: `Your application failed to build. Linter/Build Report:\n\n${githubResult.testOutput || 'Unknown Build Error'}`,
+              details: []
             };
           }
 
