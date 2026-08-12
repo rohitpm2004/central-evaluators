@@ -20,7 +20,8 @@ export async function cloneRepo(repoUrl) {
     fs.mkdirSync(TEMP_DIR, { recursive: true });
   }
 
-  const repoName = `repo_${Date.now()}`;
+  const { randomUUID } = await import('crypto');
+  const repoName = `repo_${Date.now()}_${randomUUID()}`;
   const repoPath = path.join(TEMP_DIR, repoName);
 
   const cloneArgs = ['--depth', '1'];
@@ -29,7 +30,7 @@ export async function cloneRepo(repoUrl) {
   }
   cloneArgs.push('--');
 
-  await simpleGit().clone(actualCloneUrl, repoPath, cloneArgs);
+  await simpleGit({ env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }).clone(actualCloneUrl, repoPath, cloneArgs);
 
   return repoPath;
 }

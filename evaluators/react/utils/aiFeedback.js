@@ -12,16 +12,15 @@ let client = null;
 function getClient() {
   if (client) return client;
 
-  const apiKey = process.env.GROQ_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    logger.warn("GROQ_API_KEY not set — AI feedback will be skipped.");
+    logger.warn("OPENAI_API_KEY not set — AI feedback will be skipped.");
     return null;
   }
 
-  // Groq is OpenAI API-compatible — just point baseURL to Groq's endpoint
+  // Use the official OpenAI endpoint
   client = new OpenAI({
     apiKey,
-    baseURL: process.env.GROQ_BASE_URL || "https://api.groq.com/openai/v1",
   });
 
   logger.info("Groq client initialised.");
@@ -87,7 +86,7 @@ Write 2–3 sentences of constructive, encouraging feedback for the student.
     logger.debug("Sending prompt to Groq...");
 
     const response = await openai.chat.completions.create({
-      model: "llama-3.1-8b-instant",   // Stable Groq model
+      model: "gpt-4o-mini",   // OpenAI model
       messages: [{ role: "user", content: prompt }],
       max_tokens: 250,
       temperature: 0.6,
@@ -195,7 +194,7 @@ Do NOT include any markdown or text besides the raw JSON object.
 `.trim();
 
     const response = await openai.chat.completions.create({
-      model: "llama-3.1-8b-instant",
+      model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
       max_tokens: 150,
       temperature: 0.1,

@@ -2,8 +2,9 @@ import { Worker } from 'bullmq';
 import redisConnection from '../config/redis.js';
 import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
-import { evaluateFullstackProject } from "../evaluators/fullstack/evaluatorService.js"
-
+import { triggerGraderWorkflow } from '../services/githubActionService.js';
+import { withTimeout } from '../evaluators/react/utils/timeout.js';
+import { evaluateReactProject as evaluateFullstackProject } from "../evaluators/react/evaluatorService.js";
 
 let fullstackWorker = null;
 
@@ -11,7 +12,6 @@ export async function initializeFullstackWorker() {
   try {
     logger.info('Initializing Fullstack Worker...');
 
-    const jsQueue = queueManager.getQueue('fullstack');
     const config = queueManager.getConfig('fullstack');
 
     fullstackWorker = new Worker(
@@ -19,8 +19,71 @@ export async function initializeFullstackWorker() {
       async (job) => {
         try {
           logger.info(`Starting Fullstack evaluation: ${job.id}`);
-          const results = await evaluateFullstackProject(job.data); // V-41: must await
-          logger.info(`Fullstack Job ${job.id} completed`);
+          
+          // Phase 1: Dispatch to GitHub Actions
+          const githubResult = await withTimeout(
+            new Promise((resolve, reject) => {
+              const subscriber = redisConnection.getClient().duplicate();
+              let timeoutId;
+              
+              subscriber.subscribe(`github_webhook_${job.id}`, async (err) => {
+                if (err) {
+                  await subscriber.quit();
+                  return reject(err);
+                }
+                
+                timeoutId = setTimeout(async () => {
+                  await subscriber.quit();
+                  reject(new Error("GitHub Actions webhook timeout"));
+                }, config.timeout);
+                
+                try {
+                  const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+                  const repoUrl = job.data.repoUrl || job.data.submission_link;
+                  await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-fullstack-evaluation');
+                } catch (e) {
+                  clearTimeout(timeoutId);
+                  await subscriber.quit();
+                  return reject(e);
+                }
+              });
+
+              subscriber.on('message', async (channel, message) => {
+                if (channel === `github_webhook_${job.id}`) {
+                  clearTimeout(timeoutId);
+                  await subscriber.quit();
+                  try {
+                    const payload = JSON.parse(message);
+                    resolve(payload);
+                  } catch (parseErr) {
+                    reject(parseErr);
+                  }
+                }
+              });
+            }),
+            config.timeout,
+            `fullstack-eval-github ${job.id}`
+          );
+
+          // Phase 2: Handle GitHub result
+          if (githubResult.status !== 'completed' || (githubResult.testOutput || '').toLowerCase().includes('build: failed')) {
+            logger.info(`Fullstack Job ${job.id} failed build on GitHub Actions.`);
+            return {
+              success: true,
+              results: {
+                score: 0,
+                feedback: `Your application failed to build. Linter/Build Report:\n\n${githubResult.testOutput || 'Unknown Build Error'}`,
+                rubric_breakdown: []
+              }
+            };
+          }
+
+          // Phase 3: Token-optimized AI Scoring
+          logger.info(`GitHub Action completed successfully for Fullstack Job ${job.id}. Proceeding to AI rubric evaluation.`);
+          const githubReport = githubResult.testOutput || 'Build and Linter Passed.';
+          const results = await evaluateFullstackProject(job.data, job.id, githubReport); // passing report
+          
+          logger.info(`Fullstack Job ${job.id} completed entirely.`);
           return { success: true, results };
         } catch (err) {
           logger.error(`Fullstack Job ${job.id} failed`, err);

@@ -6,7 +6,7 @@ import logger from '../config/logger.js';
  * @param {string} jobId - The unique BullMQ job ID.
  * @param {string} webhookUrl - The URL GitHub should ping when done.
  */
-export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl) => {
+export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl, eventType = 'run-evaluation') => {
   const username = process.env.GITHUB_USERNAME;
   const token = process.env.GITHUB_PAT;
   const repoName = 'async-grader';
@@ -17,7 +17,7 @@ export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl) => {
 
   const apiUrl = `https://api.github.com/repos/${username}/${repoName}/dispatches`;
 
-  logger.info(`Triggering GitHub Action for repo: ${repoUrl} (Job: ${jobId})`, { service: 'github-service' });
+  logger.info(`Triggering GitHub Action for repo: ${repoUrl} (Job: ${jobId}, Event: ${eventType})`, { service: 'github-service' });
 
   const MAX_RETRIES = 3;
   let attempt = 0;
@@ -32,7 +32,7 @@ export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          event_type: 'run-evaluation',
+          event_type: eventType,
           client_payload: {
             repoUrl,
             jobId,

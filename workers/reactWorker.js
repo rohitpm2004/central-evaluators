@@ -2,7 +2,8 @@ import { Worker } from 'bullmq';
 import redisConnection from '../config/redis.js';
 import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
-// import { evaluateReact } from '../evaluators/react/evaluatorService.js';
+import { triggerGraderWorkflow } from '../services/githubActionService.js';
+import { withTimeout } from '../evaluators/react/utils/timeout.js';
 import { evaluateReactProject } from '../evaluators/react/evaluatorService.js';
 
 let reactWorker = null;
@@ -11,7 +12,6 @@ export async function initializeReactWorker() {
   try {
     logger.info('Initializing React Worker...');
 
-    const reactQueue = queueManager.getQueue('react');
     const config = queueManager.getConfig('react');
 
     reactWorker = new Worker(
@@ -19,8 +19,70 @@ export async function initializeReactWorker() {
       async (job) => {
         try {
           logger.info(`Starting React evaluation: ${job.id}`);
-          const results = await evaluateReactProject(job.data);
-          logger.info(`React Job ${job.id} completed`);
+          
+          const results = await withTimeout(
+            (async () => {
+              // Phase 1: Dispatch to GitHub Actions
+              const githubResult = await new Promise((resolve, reject) => {
+                const subscriber = redisConnection.getClient().duplicate();
+                let timeoutId;
+                
+                subscriber.subscribe(`github_webhook_${job.id}`, async (err) => {
+                  if (err) {
+                    await subscriber.quit();
+                    return reject(err);
+                  }
+                  
+                  timeoutId = setTimeout(async () => {
+                    await subscriber.quit();
+                    reject(new Error("GitHub Actions webhook timeout"));
+                  }, config.timeout);
+                  
+                  try {
+                    const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+                    const repoUrl = job.data.repoUrl || job.data.submission_link;
+                    await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-react-evaluation');
+                  } catch (e) {
+                    clearTimeout(timeoutId);
+                    await subscriber.quit();
+                    return reject(e);
+                  }
+                });
+
+                subscriber.on('message', async (channel, message) => {
+                  if (channel === `github_webhook_${job.id}`) {
+                    clearTimeout(timeoutId);
+                    await subscriber.quit();
+                    try {
+                      const payload = JSON.parse(message);
+                      resolve(payload);
+                    } catch (parseErr) {
+                      reject(parseErr);
+                    }
+                  }
+                });
+              });
+
+              // Phase 2: Handle GitHub result
+              if (githubResult.status !== 'completed' || (githubResult.testOutput || '').toLowerCase().includes('build: failed')) {
+                logger.info(`React Job ${job.id} failed build on GitHub Actions.`);
+                return {
+                  score: 0,
+                  feedback: `Your application failed to build. Linter/Build Report:\n\n${githubResult.testOutput || 'Unknown Build Error'}`,
+                  rubric_breakdown: []
+                };
+              }
+
+              // Phase 3: Token-optimized AI Scoring
+              logger.info(`GitHub Action completed successfully for React Job ${job.id}. Proceeding to AI rubric evaluation.`);
+              const githubReport = githubResult.testOutput || 'Build and Linter Passed.';
+              return await evaluateReactProject(job.data, job.id, githubReport);
+            })(),
+            config.timeout,
+            `react-eval-job ${job.id}`
+          );
+          
+          logger.info(`React Job ${job.id} completed entirely.`);
           return { success: true, results };
         } catch (err) {
           logger.error(`React Job ${job.id} failed`, err);

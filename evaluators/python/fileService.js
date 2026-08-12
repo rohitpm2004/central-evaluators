@@ -7,35 +7,32 @@ export function findPythonFiles(rootDir) {
 
   const students = [];
 
-  const folders = fs.readdirSync(rootDir);
-
-  for (const folder of folders) {
-
-    const studentPath = path.join(rootDir, folder);
-
-    if (!fs.lstatSync(studentPath).isDirectory()) {
-      continue;
-    }
-
-    const files = fs.readdirSync(studentPath);
-
-    const pyFiles = files.filter(
-      file => file.endsWith(".py")
-    );
-
-    if (pyFiles.length === 0) {
-      continue;
-    }
-
-    const filePath = path.join(
-      studentPath,
-      pyFiles[0]
-    );
-
+  // Check root directory for .py files
+  const rootFiles = fs.readdirSync(rootDir);
+  const rootPyFiles = rootFiles.filter(f => fs.lstatSync(path.join(rootDir, f)).isFile() && f.endsWith(".py"));
+  if (rootPyFiles.length > 0) {
     students.push({
-      name: folder,
-      filePath
+      name: "root",
+      filePath: path.join(rootDir, rootPyFiles[0])
     });
+  }
+
+  // Also check subfolders
+  for (const item of rootFiles) {
+    const itemPath = path.join(rootDir, item);
+    if (!fs.lstatSync(itemPath).isDirectory() || item === '.git') {
+      continue;
+    }
+
+    const files = fs.readdirSync(itemPath);
+    const pyFiles = files.filter(file => file.endsWith(".py"));
+
+    if (pyFiles.length > 0) {
+      students.push({
+        name: item,
+        filePath: path.join(itemPath, pyFiles[0])
+      });
+    }
   }
 
   return students;

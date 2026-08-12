@@ -23,6 +23,10 @@ export function runPython(filePath, input) {
       output += data;
     });
 
+    process.on("error", (err) => {
+      resolve(`Error: ${err.message}`); // Resolve with error instead of rejecting to allow evaluation to continue with 0 score
+    });
+
     process.on("close", () => {
       resolve(output.trim());
     });
