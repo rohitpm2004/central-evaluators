@@ -6,7 +6,7 @@ import logger from '../config/logger.js';
  * @param {string} jobId - The unique BullMQ job ID.
  * @param {string} webhookUrl - The URL GitHub should ping when done.
  */
-export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl, eventType = 'run-evaluation') => {
+export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl, eventType = 'run-evaluation', extraPayload = {}) => {
   const username = process.env.GITHUB_USERNAME;
   const token = process.env.GITHUB_PAT;
   const repoName = 'async-grader';
@@ -37,7 +37,8 @@ export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl, eventTyp
             repoUrl,
             jobId,
             webhookUrl,
-            webhookSecret: process.env.WEBHOOK_SECRET
+            webhookSecret: process.env.WEBHOOK_SECRET,
+            ...extraPayload
           }
         })
       });

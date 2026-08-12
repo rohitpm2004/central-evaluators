@@ -1,126 +1,93 @@
-import fs from "fs-extra";
+import OpenAI from 'openai';
+import logger from '../../config/logger.js';
 
-import extractSubmission from "./extractService.js";
-import createSandbox, { destroySandbox, getProjectPath } from "./sandboxService.js";
+let client = null;
 
-import detectLanguage from "./utils/detectLanguage.js";
+function getClient() {
+  if (client) return client;
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    logger.warn('OPENAI_API_KEY not set - Backend AI feedback will fail.');
+    return null;
+  }
+  client = new OpenAI({ apiKey });
+  return client;
+}
 
-import runJestEvaluation from "./runners/jestRunner.js";
-import runPytestEvaluation from "./runners/pytestRunner.js";
-
-import { evaluateResults } from "./scoringService.js";
-import getAiFeedback from "./feedbackService.js";
-
-export async function evaluateBackendProject(payload) {
-
-  if (!payload.rubric || !Array.isArray(payload.rubric.criteria) || payload.rubric.criteria.length === 0) {
-    throw new Error("payload.rubric.criteria must be a non-empty array");
+export async function evaluateBackendProject(jobData, jobId, githubCodeContext) {
+  const openai = getClient();
+  if (!openai) {
+    return {
+      score: 0,
+      feedback: "OpenAI API key is missing on the server. Cannot evaluate.",
+      rubric_breakdown: []
+    };
   }
 
-  // Defense in depth: evaluatorController.js validates this same shape
-  // before a job is ever queued, but a criterion missing/with a
-  // non-numeric weight silently turns the *entire* score NaN (`maxScore +=
-  // possiblePoints` in scoringService.js accumulates a running total), so
-  // this is worth checking again right at the worker boundary too, not
-  // just trusting every caller went through the HTTP controller.
-  for (const [i, criterion] of payload.rubric.criteria.entries()) {
-    if (!criterion || typeof criterion.name !== "string" || !criterion.name.trim()) {
-      throw new Error(`payload.rubric.criteria[${i}] is missing a string "name".`);
-    }
-    if (typeof criterion.weight !== "number" || !Number.isFinite(criterion.weight) || criterion.weight <= 0) {
-      throw new Error(`payload.rubric.criteria[${i}] ("${criterion.name}") must have a positive numeric "weight".`);
-    }
-  }
+  const { rubric } = jobData;
+  const rubricText = rubric ? JSON.stringify(rubric, null, 2) : "Standard Grading";
 
-  // 1. Clone repo
-  // `uploadPath` is what gets graded (may be a subfolder, for a GitHub
-  // "/tree/<branch>/<path>" URL — see extractService.js); `cleanupPath` is
-  // always the whole clone, so a subfolder submission doesn't leak the rest
-  // of the repo on disk.
-  const { uploadPath, cleanupPath } = await extractSubmission(payload.repoUrl);
+  const prompt = `
+You are an expert Backend (Node.js/Express/MongoDB) instructor evaluating a student's assignment.
 
-  let sandbox;
+## Rubric:
+${rubricText}
+
+## Student's Core Source Code:
+${githubCodeContext}
+
+Please carefully analyze the attached source code and determine how well they met the rubric requirements.
+
+**IMPORTANT GRADING INSTRUCTIONS:**
+1. **Focus on Backend Logic:** Check for proper routing, controller logic, mongoose schemas/models, and error handling.
+2. **Missing Files:** The code provided is a subset of the repository (only core .js files). If package.json or minor files are missing from the context, do not heavily penalize them.
+3. **Database Connection:** Do not penalize if the .env file is missing, this is expected for security reasons.
+
+Write constructive, encouraging feedback based on their code.
+Do NOT mention the numeric score in the feedback text.
+
+Output STRICTLY a JSON object with this exact format (no markdown, no extra text):
+{
+  "score": <number 0-100>,
+  "summary": "1-2 sentences summarizing their attempt.",
+  "strengths": ["1 thing they did well, especially regarding backend logic"],
+  "issues": ["1-2 things that need fixing based on the rubric"],
+  "rubric_breakdown": [
+     { "criterion": "Name of criterion", "points_awarded": <number>, "max_points": <number>, "comment": "Brief comment" }
+  ]
+}
+`.trim();
 
   try {
-    // 2. Sandbox
-    // Bug (backendBugs.md #4): the sandbox created here was never destroyed
-    // — every run (success or failure) leaked a live E2B sandbox that kept
-    // billing/consuming quota indefinitely. Everything below now runs inside
-    // this try so destroySandbox() always fires, mirroring how the
-    // fullstack evaluator (evaluators/fullstack/evaluatorService.js) does it.
-    sandbox = await createSandbox(uploadPath);
+    logger.info(`Sending Backend code to OpenAI for job ${jobId}...`);
 
-    // 3. Detect stack
-    const language = await detectLanguage(sandbox);
-    const projectPath = getProjectPath();
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 500,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+    });
 
-    let testResults;
-
-    // 4. Run tests
-    // Bug (backendBugs.md #1): these calls used to omit `projectPath`
-    // entirely — `runJestEvaluation(sandbox, projectPath, rubric)` was
-    // invoked as `runJestEvaluation(sandbox, payload.rubric)`, so the
-    // rubric object was passed positionally as `projectPath` (interpolated
-    // into shell commands as "[object Object]") and `rubric` inside the
-    // runner was `undefined`.
-    if (language === null) {
-      // detectLanguage found neither a package.json nor a Python entry
-      // point -- there's no runner that could grade this. Fail the
-      // submission cleanly (0/0, explained) instead of guessing a language
-      // and letting the runner crash on a missing manifest.
-      testResults = {
-        passedCount: 0,
-        totalTests: 0,
-        test_details: [],
-        warnings: ["Could not detect a Node.js or Python project (no package.json, requirements.txt, main.py, or app.py found) — this submission could not be graded."],
-        execution_logs: []
-      };
-    } else if (language === "python") {
-      testResults = await runPytestEvaluation(
-        sandbox,
-        projectPath,
-        payload.rubric
-      );
-    } else {
-      testResults = await runJestEvaluation(
-        sandbox,
-        projectPath,
-        payload.rubric
-      );
-    }
-
-    // 5. Score
-    // Bug (backendBugs.md #1): scoringService.evaluateResults has the
-    // signature (rubric, testResults) — this call passed them in the
-    // opposite order, so `rubric.criteria` read from the test-results object
-    // (always empty) and every submission scored 0/0.
-    const score = evaluateResults(
-      payload.rubric,
-      testResults
-    );
-
-    // 6. Feedback
-    // Bug (backendBugs.md #1): feedbackService.getAiFeedback expects an
-    // array of individual test results (it calls `.filter()` on it), but
-    // this passed the whole `testResults` object, throwing
-    // `TypeError: testDetails.filter is not a function` on every run that
-    // reached this line.
-    const feedback = await getAiFeedback(
-      testResults.test_details,
-      payload.rubric
-    );
+    const resultStr = response.choices[0].message.content.trim();
+    const resultObj = JSON.parse(resultStr);
 
     return {
-      score,
-      feedback,
-      testResults
+      score: resultObj.score || 0,
+      feedback: JSON.stringify({
+        summary: resultObj.summary,
+        strengths: resultObj.strengths || [],
+        issues: resultObj.issues || []
+      }),
+      rubric_breakdown: resultObj.rubric_breakdown || []
     };
 
-  } finally {
-    // Bug (backendBugs.md #4): the cloned repo under os.tmpdir() was only
-    // ever removed on a clone *failure* (see extractService.js's catch
-    // block) — every successful run leaked its checkout on the host disk.
-    await destroySandbox(sandbox);
-    await fs.remove(cleanupPath);
+  } catch (err) {
+    logger.error(`OpenAI API call failed for Backend feedback (Job: ${jobId}):`, err.message);
+    return {
+      score: 0,
+      feedback: "Failed to generate AI feedback due to an internal server error.",
+      rubric_breakdown: []
+    };
   }
 }

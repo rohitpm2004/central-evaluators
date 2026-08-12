@@ -13,17 +13,12 @@ import { Worker, UnrecoverableError } from 'bullmq';
 import redisConnection from '../config/redis.js';
 import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
-import { getBrowserPool } from '../evaluators/visual/browserPool.js';
-import { evaluateStudentsWithVision } from '../evaluators/visual/evaluatorService.js';
-import { cloneGitRepo, deleteRepo, sweepStaleRepos } from '../evaluators/visual/repoService.js';
-import { RubricParseError } from '../evaluators/visual/rubricSchema.js';
+import { triggerGraderWorkflow } from '../services/githubActionService.js';
 import { withTimeout } from '../evaluators/react/utils/timeout.js';
 
 let visualWorker = null;
 
-// Free-tier RAM budget: each Chromium instance is ~300-500MB, so default to a
-// pool of 1 unless BROWSER_POOL_SIZE is set (e.g. on a bigger instance).
-const BROWSER_POOL_SIZE = parseInt(process.env.BROWSER_POOL_SIZE) || 1;
+// No longer requires BROWSER_POOL_SIZE as execution is offloaded.
 
 /**
  * Initialize visual worker
@@ -33,11 +28,7 @@ export async function initializeVisualWorker() {
   try {
     logger.info('Initializing Visual Worker...');
 
-    // Clean up clone dirs orphaned by a previous crash (V-25)
-    await sweepStaleRepos();
-
-    // Initialize browser pool first
-    await getBrowserPool(BROWSER_POOL_SIZE);
+    // No longer initializing browser pool.
 
     // Get queue from queueManager
     const visualQueue = queueManager.getQueue('visual');
@@ -82,11 +73,6 @@ export async function initializeVisualWorker() {
  */
 async function processVisualJob(job) {
   const jobId = job.id;
-  const jobData = job.data;
-  let repoPath = null;
-
-  let browserPool = null;
-
   const config = queueManager.getConfig('visual');
 
   const {
@@ -94,97 +80,81 @@ async function processVisualJob(job) {
     rubricText,
     expectedUrl,
     assignmentId
-    } = job.data;
+  } = job.data;
+  
   try {
-    logger.info(`Starting visual evaluation job: ${jobId}`);
-     repoPath = await cloneGitRepo(
-      submission.repoUrl
-    );
+    logger.info(`Starting visual evaluation via GitHub Actions: ${jobId}`);
     
-    // Get browser pool
-    browserPool = await getBrowserPool(BROWSER_POOL_SIZE);
-    logger.debug(`Browser pool stats:`, browserPool.getStats());
-    
-    // Main evaluation logic
-    // const results = await evaluateStudentsWithVision({
-      //   rubricText: jobData.rubricText,
-      //   expectedUrl: jobData.expectedUrl,
-      //   repoUrl: jobData.repoUrl
-      // });
+    const result = await withTimeout(
+      new Promise((resolve, reject) => {
+        const subscriber = redisConnection.getClient().duplicate();
+        let timeoutId;
         
-        logger.debug(`Job data:`, {
-          jobId,
-          repoUrl: submission.repoUrl,
-          expectedUrl,
-          rubricLength: rubricText?.length
+        subscriber.subscribe(`github_webhook_${jobId}`, async (err) => {
+          if (err) {
+            await subscriber.quit();
+            return reject(err);
+          }
+          
+          timeoutId = setTimeout(async () => {
+            await subscriber.quit();
+            reject(new Error("GitHub Actions webhook timeout"));
+          }, config.timeout);
+          
+          try {
+            const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+            const repoUrl = submission.repoUrl;
+            const extraPayload = {
+              rubricText,
+              expectedUrl,
+              assignmentId,
+              studentId: submission.studentId,
+              studentName: submission.studentName,
+              entryFile: submission.entryFile
+            };
+            
+            await triggerGraderWorkflow(repoUrl, jobId, webhookUrl, 'run-visual-evaluation', extraPayload);
+          } catch (e) {
+            clearTimeout(timeoutId);
+            await subscriber.quit();
+            return reject(e);
+          }
         });
-const result =
-  await withTimeout(
-    evaluateStudentsWithVision({
-      jobId,
-      assignmentId,
-      studentId:
-        submission.studentId,
 
-      studentName:
-        submission.studentName,
+        subscriber.on('message', async (channel, message) => {
+          if (channel === `github_webhook_${jobId}`) {
+            clearTimeout(timeoutId);
+            await subscriber.quit();
+            try {
+              const payload = JSON.parse(message);
+              if (payload.status === 'completed') {
+                resolve(payload.result || []);
+              } else {
+                reject(new Error("GitHub Actions job failed or cancelled"));
+              }
+            } catch (parseErr) {
+              reject(parseErr);
+            }
+          }
+        });
+      }),
+      config.timeout,
+      `visual-eval ${jobId}`
+    );
 
-      repoPath,
+    logger.info(`Job completed via GitHub Actions: ${jobId}`);
 
-      rubricText,
-      expectedUrl,
-      entryFile: submission.entryFile
-    }),
-    config.timeout, // V-08: real, enforced job timeout
-    `visual-eval ${jobId}`
-  );
-
-    logger.info(`Job completed: ${jobId}`, {
-      totalStudents: result?.length || 0,
-      successCount: result?.filter(r => !r.error)?.length || 0
-    });
-
-    // return {
-    //   success: true,
-    //   jobId,
-    //   results,
-    //   timestamp: new Date().toISOString()
-    // };
     return {
-  success: true,
-  result
-};
-
+      success: true,
+      result
+    };
   } catch (err) {
     logger.error(`Job failed: ${jobId}`, {
       error: err.message,
       stack: err.stack
     });
-
-    // V-17: classify failures. Permanent ones (bad rubric, missing inputs) must
-    // NOT be retried 3x — that just burns GPT-4o spend on a deterministic fail.
-    const permanent =
-      err instanceof RubricParseError ||
-      err.message === 'Missing required inputs';
-
-    if (permanent) {
-      throw new UnrecoverableError(err.message);
-    }
-
-    throw err;  // transient (network / browser) → BullMQ retries
-
-  }finally {
-  if (repoPath) {
-
-    await deleteRepo(
-      repoPath
-    );
-
-    logger.info(
-      `[VISUAL WORKER] Deleted repo ${repoPath}`
-    );
+    throw err;
   }
-}
 }
 
 /**
@@ -247,11 +217,7 @@ export async function stopVisualWorker() {
       await visualWorker.close();
     }
 
-    // Close browser pool
-    const browserPool = await getBrowserPool(BROWSER_POOL_SIZE).catch(() => null);
-    if (browserPool) {
-      await browserPool.close();
-    }
+    // No longer closing browser pool
 
     logger.info('Visual worker stopped');
 

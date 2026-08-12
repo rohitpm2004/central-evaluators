@@ -88,13 +88,18 @@ function validateBackendPayload(payload) {
   validateRubricCriteria(rubric);
 }
 
-// python. just needs a cloneable repoUrl (test cases come from a fixed server side repo, not the payload)
 function validatePythonPayload(payload) {
-  const { repoUrl } = payload;
-  if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
-    throw new ValidationError('repoUrl is required');
+  const { submissions } = payload;
+  if (!Array.isArray(submissions) || submissions.length === 0) {
+    throw new ValidationError('submissions must be a non-empty array');
   }
-  assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
+  const allowedHosts = getAllowedGitHosts();
+  for (const s of submissions) {
+    if (!s || typeof s.repoUrl !== 'string') {
+      throw new ValidationError('each submission needs a repoUrl');
+    }
+    assertUrlSyntax(s.repoUrl, { allowedHosts });
+  }
 }
 
 // react. repoUrl + rubric. same criteria shape as backend.

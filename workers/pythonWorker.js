@@ -2,10 +2,9 @@ import { Worker } from 'bullmq';
 import redisConnection from '../config/redis.js';
 import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
-// import { evaluateJavaScript } from '../evaluators/javascript/evaluatorService.js';
-import { cloneRepo, deleteRepo } from "../evaluators/python/repoService.js";
-import { findPythonFiles } from "../evaluators/python/fileService.js";
-import { evaluateAll } from "../evaluators/python/evaluator.js";
+import { triggerGraderWorkflow } from '../services/githubActionService.js';
+import { withTimeout } from '../evaluators/react/utils/timeout.js';
+import { webhookPubSub } from '../services/webhookPubSub.js';
 
 let pythonWorker = null;
 
@@ -19,27 +18,54 @@ export async function initializePythonWorker() {
     pythonWorker = new Worker(
       'python-evaluation',
       async (job) => {
-          let repoPath;
           try {
-            logger.info(`Starting Python evaluation: ${job.id}`);
-            const { repoUrl } = job.data;
-            // 1. Clone repo
-            repoPath = await cloneRepo(repoUrl);
-            // 2. Find python files
-            const students = findPythonFiles(repoPath);
-            // 3. Evaluate
-            const results = await evaluateAll(students);
-            // const results = await evaluateJavaScript(job.data);
-            logger.info(`Python Job ${job.id} completed`);
+            logger.info(`Starting Python evaluation via GitHub Actions: ${job.id}`);
+            const { submission, testCases, evaluationMode, entryFunction, expectedLogs } = job.data;
+            const repoUrl = submission.repoUrl;
+            
+            const results = await withTimeout(
+              (async () => {
+                const webhookPromise = webhookPubSub.waitForWebhook(job.id, config.timeout);
+                
+                const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+                const extraPayload = { testCases, evaluationMode, entryFunction, expectedLogs };
+                await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-python-evaluation', extraPayload);
+                
+                const githubResult = await webhookPromise;
+                
+                if (githubResult.status === 'completed') {
+                  const testCaseResults = githubResult.results || [];
+                  let score = 0;
+                  let feedback = "Evaluation completed successfully.";
+                  
+                  if (evaluationMode === 'function') {
+                    const total = testCaseResults.length;
+                    const passed = testCaseResults.filter(r => r.passed).length;
+                    score = total > 0 ? (passed / total) * 100 : 0;
+                    feedback = `Passed ${passed} out of ${total} test cases.`;
+                  } else if (evaluationMode === 'script') {
+                    score = testCaseResults[0]?.score || 0;
+                    feedback = testCaseResults[0]?.passed ? "All logs matched." : "Some logs did not match.";
+                  }
+
+                  return {
+                    score,
+                    feedback,
+                    details: testCaseResults
+                  };
+                } else {
+                  throw new Error("GitHub Actions job failed or cancelled");
+                }
+              })(),
+              config.timeout,
+              `python-eval ${job.id}`
+            );
+            
+            logger.info(`Python Job ${job.id} completed via GitHub Actions`);
             return { success: true, results };
           } catch (err) {
             logger.error(`Python Job ${job.id} failed`, err);
             throw err;
-          } finally {
-            if (repoPath) {
-              await deleteRepo(repoPath);
-              logger.info(`[PYTHON WORKER] deleted temp repo: ${repoPath}`);
-            }
           }
       },
       {

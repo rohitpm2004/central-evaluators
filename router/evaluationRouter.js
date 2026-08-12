@@ -15,7 +15,7 @@ export async function routeEvaluation(payload) {
     // logger.info(`Job routed: ${type}`, { jobId: job.id });
     // return job;
     if (
-  ['javascript', 'visual'].includes(type) &&
+  ['javascript', 'visual', 'python'].includes(type) &&
   payload.submissions
 ) {
 

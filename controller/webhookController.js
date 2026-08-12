@@ -9,7 +9,7 @@ export const handleGithubWebhook = async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const { jobId, status, testOutput } = req.body;
+    const { jobId, status } = req.body;
 
     if (!jobId) {
       return res.status(400).json({ error: "Missing jobId in payload" });
@@ -17,11 +17,11 @@ export const handleGithubWebhook = async (req, res) => {
 
     logger.info(`Received GitHub webhook for job: ${jobId} with status: ${status}`);
 
-    // Publish the result to the Redis channel that the worker is listening on
+    // Publish the entire result to the Redis channel that the worker is listening on
     const publisher = redisConnection.getClient();
     await publisher.publish(
       `github_webhook_${jobId}`,
-      JSON.stringify({ status, testOutput })
+      JSON.stringify(req.body)
     );
 
     return res.status(200).json({ success: true, message: "Webhook processed" });

@@ -5,6 +5,7 @@ import logger from '../config/logger.js';
 import { triggerGraderWorkflow } from '../services/githubActionService.js';
 import { withTimeout } from '../evaluators/react/utils/timeout.js';
 import { evaluateReactProject } from '../evaluators/react/evaluatorService.js';
+import { webhookPubSub } from '../services/webhookPubSub.js';
 
 let reactWorker = null;
 
@@ -22,46 +23,15 @@ export async function initializeReactWorker() {
           
           const results = await withTimeout(
             (async () => {
-              // Phase 1: Dispatch to GitHub Actions
-              const githubResult = await new Promise((resolve, reject) => {
-                const subscriber = redisConnection.getClient().duplicate();
-                let timeoutId;
-                
-                subscriber.subscribe(`github_webhook_${job.id}`, async (err) => {
-                  if (err) {
-                    await subscriber.quit();
-                    return reject(err);
-                  }
-                  
-                  timeoutId = setTimeout(async () => {
-                    await subscriber.quit();
-                    reject(new Error("GitHub Actions webhook timeout"));
-                  }, config.timeout);
-                  
-                  try {
-                    const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
-                    const repoUrl = job.data.repoUrl || job.data.submission_link;
-                    await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-react-evaluation');
-                  } catch (e) {
-                    clearTimeout(timeoutId);
-                    await subscriber.quit();
-                    return reject(e);
-                  }
-                });
-
-                subscriber.on('message', async (channel, message) => {
-                  if (channel === `github_webhook_${job.id}`) {
-                    clearTimeout(timeoutId);
-                    await subscriber.quit();
-                    try {
-                      const payload = JSON.parse(message);
-                      resolve(payload);
-                    } catch (parseErr) {
-                      reject(parseErr);
-                    }
-                  }
-                });
-              });
+              // Phase 1: Wait for webhook & Dispatch to GitHub Actions
+              const webhookPromise = webhookPubSub.waitForWebhook(job.id, config.timeout);
+              
+              const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+              const repoUrl = job.data.repoUrl || job.data.submission_link;
+              await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-react-evaluation');
+              
+              // Now await the result
+              const githubResult = await webhookPromise;
 
               // Phase 2: Handle GitHub result
               if (githubResult.status !== 'completed' || (githubResult.testOutput || '').toLowerCase().includes('build: failed')) {

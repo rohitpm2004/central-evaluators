@@ -4,7 +4,8 @@ import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
 import { triggerGraderWorkflow } from '../services/githubActionService.js';
 import { withTimeout } from '../evaluators/react/utils/timeout.js';
-
+import { evaluateBackendProject } from '../evaluators/backend/evaluatorService.js';
+import { webhookPubSub } from '../services/webhookPubSub.js';
 
 let backendWorker = null;
 
@@ -12,7 +13,6 @@ export async function initializeBackendWorker() {
   try {
     logger.info('Initializing Backend Worker...');
 
-    const jsQueue = queueManager.getQueue('backend');
     const config = queueManager.getConfig('backend');
 
     backendWorker = new Worker(
@@ -20,65 +20,40 @@ export async function initializeBackendWorker() {
       async (job) => {
         try {
           logger.info(`Starting Backend evaluation: ${job.id}`);
-          // Bug (backendBugs.md #8): unlike visualWorker.js, this call was
-          // never wrapped in withTimeout. A hung sandbox command (stalled
-          // `npm install`, a student server that never exits, an infinite
-          // loop under test) would block this worker slot forever — with
-          // concurrency 3, three such jobs stall the entire backend queue
-          // for everyone behind them, with no automatic recovery.
+          
           const results = await withTimeout(
-            new Promise((resolve, reject) => {
-              const subscriber = redisConnection.getClient().duplicate();
-              let timeoutId;
+            (async () => {
+              // Phase 1: Wait for webhook & Dispatch to GitHub Actions
+              // We set up the listener FIRST to avoid race conditions if GitHub returns instantly
+              const webhookPromise = webhookPubSub.waitForWebhook(job.id, config.timeout);
               
-              subscriber.subscribe(`github_webhook_${job.id}`, async (err) => {
-                if (err) {
-                  await subscriber.quit();
-                  return reject(err);
-                }
-                
-                // Explicit timeout to prevent Redis connection leaks
-                timeoutId = setTimeout(async () => {
-                  await subscriber.quit();
-                  reject(new Error("GitHub Actions webhook timeout"));
-                }, config.timeout);
-                
-                try {
-                  const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
-                  const repoUrl = job.data.repoUrl || job.data.submission_link;
-                  await triggerGraderWorkflow(repoUrl, job.id, webhookUrl);
-                } catch (e) {
-                  clearTimeout(timeoutId);
-                  await subscriber.quit();
-                  return reject(e);
-                }
-              });
+              const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+              const repoUrl = job.data.repoUrl || job.data.submission_link;
+              await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-backend-evaluation');
+              
+              // Now await the result
+              const githubResult = await webhookPromise;
 
-              subscriber.on('message', async (channel, message) => {
-                if (channel === `github_webhook_${job.id}`) {
-                  clearTimeout(timeoutId);
-                  await subscriber.quit();
-                  try {
-                    const payload = JSON.parse(message);
-                    if (payload.status === 'completed') {
-                      const score = (payload.testOutput || '').toLowerCase().includes('fail') ? 0 : 100;
-                      resolve({
-                        score: score,
-                        feedback: payload.testOutput || 'Evaluation completed successfully.'
-                      });
-                    } else {
-                      reject(new Error("GitHub Actions job failed or cancelled"));
-                    }
-                  } catch (parseErr) {
-                    reject(parseErr);
-                  }
-                }
-              });
-            }),
+              // Phase 2: Handle GitHub result
+              if (githubResult.status !== 'completed' || !githubResult.testOutput) {
+                logger.info(`Backend Job ${job.id} failed on GitHub Actions or returned no code.`);
+                return {
+                  score: 0,
+                  feedback: `Evaluation workflow failed to retrieve source code or encountered an error.\n\n${githubResult.testOutput || 'Unknown Error'}`,
+                  rubric_breakdown: []
+                };
+              }
+
+              // Phase 3: Token-optimized AI Scoring
+              logger.info(`GitHub Action completed successfully for Backend Job ${job.id}. Proceeding to AI rubric evaluation.`);
+              const githubCodeContext = githubResult.testOutput;
+              return await evaluateBackendProject(job.data, job.id, githubCodeContext);
+            })(),
             config.timeout,
-            `backend-eval ${job.id}`
+            `backend-eval-job ${job.id}`
           );
-          logger.info(`Backend Job ${job.id} completed`);
+          
+          logger.info(`Backend Job ${job.id} completed entirely.`);
           return { success: true, results };
         } catch (err) {
           logger.error(`Backend Job ${job.id} failed`, err);
@@ -98,7 +73,7 @@ export async function initializeBackendWorker() {
 
     // Event handlers
     backendWorker.on('completed', (job, result) => {
-      logger.info(`JS Job ${job.id} completed`, {
+      logger.info(`Backend Job ${job.id} completed`, {
         duration: job.finishedOn - job.processedOn
       });
     });

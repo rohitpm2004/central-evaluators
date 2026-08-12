@@ -2,9 +2,9 @@ import { Worker } from 'bullmq';
 import redisConnection from '../config/redis.js';
 import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
-import { cloneRepo, deleteRepo } from '../evaluators/js/repoService.js';
-import { findJavaScriptFile } from '../evaluators/js/fileService.js';
-import { evaluateStudent } from '../evaluators/js/evaluationService.js';
+import { triggerGraderWorkflow } from '../services/githubActionService.js';
+import { withTimeout } from '../evaluators/react/utils/timeout.js';
+import { generateJSAIFeedback } from '../evaluators/js/aiFeedback.js';
 
 let jsWorker = null;
 
@@ -17,10 +17,8 @@ export async function initializeJsWorker() {
     jsWorker = new Worker(
       'javascript-evaluation',
       async (job) => {
-        let repoPath;
         try {
-          logger.info(`Starting JS evaluation: ${job.id}`);
-
+          logger.info(`Starting JS evaluation via GitHub Actions: ${job.id}`);
           const {
             submission,
             testCases,
@@ -30,71 +28,92 @@ export async function initializeJsWorker() {
             functions
           } = job.data;
 
-          repoPath = await cloneRepo(submission.repoUrl);
+          const results = await withTimeout(
+            new Promise((resolve, reject) => {
+              const subscriber = redisConnection.getClient().duplicate();
+              let timeoutId;
+              
+              subscriber.subscribe(`github_webhook_${job.id}`, async (err) => {
+                if (err) {
+                  await subscriber.quit();
+                  return reject(err);
+                }
+                
+                timeoutId = setTimeout(async () => {
+                  await subscriber.quit();
+                  reject(new Error("GitHub Actions webhook timeout"));
+                }, config.timeout);
+                
+                try {
+                  const webhookUrl = `${process.env.BASE_URL}/api/webhook/github`;
+                  const repoUrl = submission.repoUrl;
+                  const extraPayload = {
+                    testCases,
+                    entryFunction,
+                    evaluationMode,
+                    expectedLogs,
+                    functions
+                  };
+                  
+                  await triggerGraderWorkflow(repoUrl, job.id, webhookUrl, 'run-js-evaluation', extraPayload);
+                } catch (e) {
+                  clearTimeout(timeoutId);
+                  await subscriber.quit();
+                  return reject(e);
+                }
+              });
 
-          // Tell findJavaScriptFile which function name(s) we're about to
-          // grade so it can pick the .js file that actually defines them,
-          // instead of just the first one alphabetically (see fileService.js).
-          const mode = evaluationMode || 'function';
-          const requiredNames = mode === 'multi-function'
-            ? (functions || []).map(fn => fn && fn.name).filter(Boolean)
-            : (entryFunction ? [entryFunction] : []);
-
-          const filePath = findJavaScriptFile(repoPath, requiredNames);
-
-          // Author: Arma Sahar
-          // Bug (jsBugs.md #9): this early-return used to have a different
-          // response shape ({ success, results: [...] }) than the normal
-          // path below ({ success, studentId, studentName, evaluation }),
-          // making the job result inconsistent for API consumers. Fixed to
-          // return the same flat shape either way.
-          if (!filePath) {
-            return {
-              success: true,
-              studentId: submission.studentId,
-              studentName: submission.studentName,
-              evaluation: {
-                score: 0,
-                error: 'No JavaScript file found'
-              }
-            };
+              subscriber.on('message', async (channel, message) => {
+                if (channel === `github_webhook_${job.id}`) {
+                  clearTimeout(timeoutId);
+                  await subscriber.quit();
+                  try {
+                    const payload = JSON.parse(message);
+                    if (payload.status === 'completed') {
+                      resolve(payload.evaluation || {
+                        passed: false,
+                        score: 0,
+                        error: "Invalid evaluation payload received from GitHub Actions"
+                      });
+                    } else {
+                      reject(new Error("GitHub Actions job failed or cancelled"));
+                    }
+                  } catch (parseErr) {
+                    reject(parseErr);
+                  }
+                }
+              });
+            }),
+            config.timeout,
+            `js-eval ${job.id}`
+          );
+          
+          logger.info(`JS Job ${job.id} completed via GitHub Actions. Generating AI feedback...`);
+          
+          const aiFeedbackString = await generateJSAIFeedback(job.data, results);
+          results.feedback = aiFeedbackString;
+          let finalScore = 0;
+          if (evaluationMode === 'function') {
+            const total = results.length;
+            const passed = results.filter(r => r.passed).length;
+            finalScore = total > 0 ? (passed / total) * 100 : 0;
+          } else if (evaluationMode === 'script') {
+            finalScore = results[0]?.score || 0;
           }
 
-          logger.info(`[JS WORKER] Processing ${submission.studentName}`);
-          logger.info(`[JS WORKER] Found file: ${filePath}`);
-          logger.info(`[JS WORKER] Entry Function: ${entryFunction}`);
-
-          const evaluation = await evaluateStudent({
-            filePath,
-            evaluationMode: evaluationMode || 'function',
-            entryFunction,
-            testCases,
-            expectedLogs,
-            functions
-          });
-
-          logger.info(`JS Job ${job.id} completed`);
-
-          // Author: Arma Sahar
-          // Bug (jsBugs.md #8): every logger.info call below this line used
-          // to sit after an earlier `return`, so it was unreachable dead
-          // code and never actually logged anything. Moved the logging
-          // above the return so it runs, and dropped the unused `results`
-          // array the dead code referenced.
           return {
             success: true,
             studentId: submission.studentId,
             studentName: submission.studentName,
-            evaluation
+            evaluation: {
+              score: finalScore,
+              feedback: aiFeedbackString,
+              details: results
+            }
           };
         } catch (err) {
           logger.error(`JS Job ${job.id} failed`, err);
           throw err;
-        } finally {
-          if (repoPath) {
-            await deleteRepo(repoPath);
-            logger.info(`[JS WORKER] Deleted temp repo: ${repoPath}`);
-          }
         }
       },
       {
