@@ -23,6 +23,12 @@ export async function initializeBackendWorker() {
           
           const results = await withTimeout(
             (async () => {
+              if (job.data.ideFiles) {
+                logger.info(`Backend Job ${job.id} is an IDE submission. Skipping GitHub Actions.`);
+                const githubCodeContext = job.data.ideFiles.map(f => `--- ${f.name} ---\n${f.content}`).join('\n\n');
+                return await evaluateBackendProject(job.data, job.id, githubCodeContext);
+              }
+
               // Phase 1: Wait for webhook & Dispatch to GitHub Actions
               // We set up the listener FIRST to avoid race conditions if GitHub returns instantly
               const webhookPromise = webhookPubSub.waitForWebhook(job.id, config.timeout);

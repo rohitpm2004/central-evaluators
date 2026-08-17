@@ -29,20 +29,28 @@ async function validateVisualPayload(payload) {
   if (rubricText.length > MAX_RUBRIC_CHARS) {
     throw new ValidationError(`rubricText too large (max ${MAX_RUBRIC_CHARS} chars)`);
   }
-  if (typeof expectedUrl !== 'string') {
+  if (typeof expectedUrl !== 'string' && !payload.ideFiles) {
     throw new ValidationError('expectedUrl is required');
   }
 
-  // Full SSRF check on the single reference URL.
-  await assertSafeUrl(expectedUrl);
+  // Full SSRF check on the single reference URL if it's a URL
+  if (expectedUrl && expectedUrl.startsWith('http')) {
+    await assertSafeUrl(expectedUrl);
+  }
 
   // Fast syntactic + allowlist check on each repo URL (full DNS check runs at clone).
   const allowedHosts = getAllowedGitHosts();
   for (const s of submissions) {
-    if (!s || typeof s.repoUrl !== 'string') {
-      throw new ValidationError('each submission needs a repoUrl');
+    if (s.ideFiles) {
+      if (!Array.isArray(s.ideFiles) || s.ideFiles.length === 0) {
+        throw new ValidationError('ideFiles must be a non-empty array');
+      }
+    } else {
+      if (!s || typeof s.repoUrl !== 'string') {
+        throw new ValidationError('each submission needs a repoUrl');
+      }
+      assertUrlSyntax(s.repoUrl, { allowedHosts });
     }
-    assertUrlSyntax(s.repoUrl, { allowedHosts });
   }
 }
 
@@ -78,12 +86,18 @@ function validateRubricCriteria(rubric) {
 }
 
 function validateBackendPayload(payload) {
-  const { repoUrl, rubric } = payload;
+  const { repoUrl, ideFiles, rubric } = payload;
 
-  if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
-    throw new ValidationError('repoUrl is required');
+  if (ideFiles) {
+    if (!Array.isArray(ideFiles) || ideFiles.length === 0) {
+      throw new ValidationError('ideFiles must be a non-empty array');
+    }
+  } else {
+    if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
+      throw new ValidationError('repoUrl is required');
+    }
+    assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
   }
-  assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
 
   validateRubricCriteria(rubric);
 }
@@ -104,11 +118,19 @@ function validatePythonPayload(payload) {
 
 // react. repoUrl + rubric. same criteria shape as backend.
 function validateReactPayload(payload) {
-  const { repoUrl, rubric } = payload;
-  if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
-    throw new ValidationError('repoUrl is required');
+  const { repoUrl, ideFiles, rubric } = payload;
+  
+  if (ideFiles) {
+    if (!Array.isArray(ideFiles) || ideFiles.length === 0) {
+      throw new ValidationError('ideFiles must be a non-empty array');
+    }
+  } else {
+    if (typeof repoUrl !== 'string' || !repoUrl.trim()) {
+      throw new ValidationError('repoUrl is required');
+    }
+    assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
   }
-  assertUrlSyntax(repoUrl, { allowedHosts: getAllowedGitHosts() });
+  
   validateRubricCriteria(rubric);
 }
 

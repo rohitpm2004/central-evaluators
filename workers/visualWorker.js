@@ -15,6 +15,10 @@ import queueManager from '../config/queueManager.js';
 import logger from '../config/logger.js';
 import { triggerGraderWorkflow } from '../services/githubActionService.js';
 import { withTimeout } from '../evaluators/react/utils/timeout.js';
+import { evaluateStudentsWithVision } from '../evaluators/visual/evaluatorService.js';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 
 let visualWorker = null;
 
@@ -83,6 +87,33 @@ async function processVisualJob(job) {
   } = job.data;
   
   try {
+    if (submission.ideFiles) {
+      logger.info(`Starting visual evaluation locally for IDE submission: ${jobId}`);
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'visual-eval-'));
+      for (const file of submission.ideFiles) {
+        if (file.path && typeof file.content === 'string') {
+          const filePath = path.join(tempDir, file.path);
+          await fs.mkdir(path.dirname(filePath), { recursive: true });
+          await fs.writeFile(filePath, file.content, 'utf8');
+        }
+      }
+      try {
+        const result = await evaluateStudentsWithVision({
+          jobId,
+          assignmentId,
+          studentId: submission.studentId,
+          studentName: submission.studentName,
+          repoPath: tempDir,
+          rubricText,
+          expectedUrl,
+          entryFile: submission.entryFile
+        });
+        return { success: true, result };
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
+    }
+
     logger.info(`Starting visual evaluation via GitHub Actions: ${jobId}`);
     
     const result = await withTimeout(

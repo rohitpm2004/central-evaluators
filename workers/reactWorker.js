@@ -23,6 +23,12 @@ export async function initializeReactWorker() {
           
           const results = await withTimeout(
             (async () => {
+              if (job.data.ideFiles) {
+                logger.info(`React Job ${job.id} is an IDE submission. Skipping GitHub Actions.`);
+                const githubReport = "IDE Submission - Build and Linter assume passed.\n\n" + job.data.ideFiles.map(f => `--- ${f.name} ---\n${f.content}`).join('\n\n');
+                return await evaluateReactProject(job.data, job.id, githubReport);
+              }
+
               // Phase 1: Wait for webhook & Dispatch to GitHub Actions
               const webhookPromise = webhookPubSub.waitForWebhook(job.id, config.timeout);
               
