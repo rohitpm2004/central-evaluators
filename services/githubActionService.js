@@ -19,7 +19,9 @@ export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl, eventTyp
 
   logger.info(`Triggering GitHub Action for repo: ${repoUrl} (Job: ${jobId}, Event: ${eventType})`, { service: 'github-service' });
 
-  const MAX_RETRIES = 3;
+  // Increased to 5 retries to handle GitHub rate-limits when 10+ evaluations
+  // are dispatched simultaneously (each concurrent worker fires a dispatch).
+  const MAX_RETRIES = 5;
   let attempt = 0;
 
   while (attempt < MAX_RETRIES) {
@@ -43,6 +45,17 @@ export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl, eventTyp
         })
       });
 
+      // Handle GitHub rate-limiting (HTTP 429) explicitly:
+      // respect the Retry-After header so we wait exactly as long as GitHub asks.
+      if (response.status === 429) {
+        const retryAfterSec = parseInt(response.headers.get('Retry-After') || '10', 10);
+        const waitMs = (retryAfterSec + 1) * 1000; // add 1s buffer
+        logger.warn(`GitHub rate-limited (429) for Job ${jobId}. Waiting ${waitMs}ms before retry ${attempt + 1}/${MAX_RETRIES}.`, { service: 'github-service' });
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        attempt++;
+        continue;
+      }
+
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`GitHub API Error: ${response.status} - ${errorText}`);
@@ -58,8 +71,10 @@ export const triggerGraderWorkflow = async (repoUrl, jobId, webhookUrl, eventTyp
         throw new Error(`Failed to trigger GitHub Action after ${MAX_RETRIES} attempts. Last error: ${error.message}`);
       }
       
-      // Wait for 2 seconds (with exponential backoff) before retrying
-      await new Promise(resolve => setTimeout(resolve, attempt * 2000));
+      // Exponential backoff: 2s, 4s, 8s, 16s between retries
+      const backoffMs = Math.pow(2, attempt) * 1000;
+      logger.info(`Retrying GitHub dispatch for Job ${jobId} in ${backoffMs}ms...`, { service: 'github-service' });
+      await new Promise(resolve => setTimeout(resolve, backoffMs));
     }
   }
 };

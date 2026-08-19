@@ -50,7 +50,7 @@ const QUEUE_CONFIG = {
   javascript: {
     jobName: 'javascript-job',
     concurrency: 5,
-    timeout: 120000,
+    timeout: 180000,      // 3 minutes (accounts for Render cold-start ~50s + GitHub Actions ~13s + AI feedback)
     description: 'JavaScript Evaluation'
   },
   
