@@ -7,6 +7,12 @@ import queueManager from './config/queueManager.js';
 import logger from './config/logger.js';
 import redisConnection from './config/redis.js';
 
+// Sanitize BASE_URL to strip accidental trailing newlines or whitespace
+// that can be introduced when copy/pasting into Render's env var UI.
+if (process.env.BASE_URL) {
+  process.env.BASE_URL = process.env.BASE_URL.trim();
+}
+
 // Initialize workers
 // NOTE: visual + javascript + backend are started for this deploy (backend
 // added once backendBugs.md's fixes landed — the worker existed and was

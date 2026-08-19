@@ -93,12 +93,21 @@ export async function initializeJsWorker() {
           const aiFeedbackString = await generateJSAIFeedback(job.data, results);
           results.feedback = aiFeedbackString;
           let finalScore = 0;
-          if (evaluationMode === 'function') {
+          // GitHub Actions sends back evaluation as either:
+          //   - An object  { passed, score, feedback }  (script mode)
+          //   - An array   [{ passed, score }, ...]     (function mode, one entry per test case)
+          // Handle both shapes so we never silently return 0.
+          if (Array.isArray(results)) {
+            // function mode — array of per-test-case results
             const total = results.length;
             const passed = results.filter(r => r.passed).length;
             finalScore = total > 0 ? (passed / total) * 100 : 0;
+          } else if (typeof results?.score === 'number') {
+            // script mode — single result object with a numeric score
+            finalScore = results.score;
           } else if (evaluationMode === 'script') {
-            finalScore = results[0]?.score || 0;
+            // fallback: treat passed as binary 0/100
+            finalScore = results?.passed ? 100 : 0;
           }
 
           return {
